@@ -11,6 +11,7 @@ except NameError:
 import numpy as np
 from array import array as arrayFast
 from numbers import Number
+from copy import copy
 from tqdm import tqdm
 
 # -----------------------------------------------------------------------------
@@ -86,7 +87,7 @@ def connectCells(self):
             self._connStrToFunc(
                 preCellsTags, postCellsTags, connParam
             )  # convert strings to functions (for the delay, and probability params)
-            connFunc(preCellsTags, postCellsTags, connParam)  # call specific conn function
+            connFunc(preCellsTags, postCellsTags, connParam, connParamLabel)  # call specific conn function
 
         # check if gap junctions in any of the conn rules (deprecated)
         if 'gapJunction' in connParam:
@@ -379,7 +380,7 @@ def _disynapticBiasProb2(self, probMatrix, allRands, bias, prePreGids, postPreGi
 # -----------------------------------------------------------------------------
 # Full connectivity
 # -----------------------------------------------------------------------------
-def fullConn(self, preCellsTags, postCellsTags, connParam):
+def fullConn(self, preCellsTags, postCellsTags, connParam, connParamLabel):
     """
     Function for/to <short description of `netpyne.network.conn.fullConn`>
 
@@ -484,7 +485,7 @@ def generateRandsPrePost(self, pre, post):
 # -----------------------------------------------------------------------------
 # Probabilistic connectivity
 # -----------------------------------------------------------------------------
-def probConn(self, preCellsTags, postCellsTags, connParam):
+def probConn(self, preCellsTags, postCellsTags, connParam, connParamLabel):
     """
     Function for/to <short description of `netpyne.network.conn.probConn`>
 
@@ -584,9 +585,20 @@ def probConn(self, preCellsTags, postCellsTags, connParam):
         if sim.rank == 0 and not sim.cfg.verbose and sim.cfg.progressBar: pbar.close()
 
 # -----------------------------------------------------------------------------
-# Generate random unique integers
+# Generate random integers
 # -----------------------------------------------------------------------------
-def randUniqueInt(self, r, N, vmin, vmax):
+def randInt(r, N, vmin, vmax, unique=False):
+
+    if unique:
+        return randUniqueInt(r, N, vmin, vmax)
+    else:
+        from neuron import h
+        r.discunif(vmin, vmax)
+        v = h.Vector(N)
+        v.setrand(r)
+        return np.array(v, dtype=int)
+
+def randUniqueInt(r, N, vmin, vmax):
     """
     Function for/to <short description of `netpyne.network.conn.randUniqueInt`>
 
@@ -614,7 +626,8 @@ def randUniqueInt(self, r, N, vmin, vmax):
 
 
     """
-
+    assert N <= (vmax - vmin) + 1, \
+        f"Error in randUniqueInt: impossible to generate {N} unique integers from [{vmin}, {vmax}]"
     r.discunif(vmin, vmax)
     out = []
     while len(out) < N:
@@ -686,7 +699,7 @@ def convConn(self, preCellsTags, postCellsTags, connParam):
             )  # num of presyn conns / postsyn cell
             convergence = max(min(int(round(convergence)), len(preCellsTags) - 1), 0)
             self.rand.Random123(hashPreCells, postCellGid, sim.cfg.seeds['conn'])  # init randomizer
-            randSample = self.randUniqueInt(self.rand, convergence + 1, 0, len(preCellsTags) - 1)
+            randSample = randUniqueInt(self.rand, convergence + 1, 0, len(preCellsTags) - 1)
 
             # note: randSample[divergence] is an extra value used only if one of the random postGids coincided with the preGid
             preCellsSample = {
@@ -772,7 +785,7 @@ def divConn(self, preCellsTags, postCellsTags, connParam):
         )  # num of presyn conns / postsyn cell
         divergence = max(min(int(round(divergence)), len(postCellsTags) - 1), 0)
         self.rand.Random123(hashPostCells, preCellGid, sim.cfg.seeds['conn'])  # init randomizer
-        randSample = self.randUniqueInt(self.rand, divergence + 1, 0, len(postCellsTags) - 1)
+        randSample = randUniqueInt(self.rand, divergence + 1, 0, len(postCellsTags) - 1)
 
         # note: randSample[divergence] is an extra value used only if one of the random postGids coincided with the preGid
         postCellsSample = {
@@ -799,7 +812,7 @@ def divConn(self, preCellsTags, postCellsTags, connParam):
 # -----------------------------------------------------------------------------
 # From list connectivity
 # -----------------------------------------------------------------------------
-def fromListConn(self, preCellsTags, postCellsTags, connParam):
+def fromListConn(self, preCellsTags, postCellsTags, connParam, connParamLabel):
     """
     Function for/to <short description of `netpyne.network.conn.fromListConn`>
 
@@ -848,46 +861,108 @@ def fromListConn(self, preCellsTags, postCellsTags, connParam):
             )
             for preId, postId in connParam['connList']
         }
+    numConns = len(connParam['connList'])
+    numSyns = connParam['synsPerConn']
 
-    if 'weight' in connParam and isinstance(connParam['weight'], list):
-        connParam['weightFromList'] = list(connParam['weight'])  # if weight is a list, copy to weightFromList
-    if 'delay' in connParam and isinstance(connParam['delay'], list):
-        connParam['delayFromList'] = list(connParam['delay'])  # if delay is a list, copy to delayFromList
-    if 'loc' in connParam and isinstance(connParam['loc'], list):
-        connParam['locFromList'] = list(connParam['loc'])  # if delay is a list, copy to locFromList
+    weights, delays, secs, locs = [], [], [], []
+    preLocs, preSecs = [], [] # for pointer connections (e.g. gap junctions) only
+    for paramName, paramValList in zip(['weight', 'delay', 'sec', 'loc', 'preLocs', 'preSecs'], 
+                                       [weights, delays, secs, locs, preLocs, preSecs]):
+        paramVal = connParam.get(paramName)
+        if not paramVal:
+            continue
+        
+        if type(paramVal) in (list, tuple):
+            assert len(paramVal) == numConns, \
+                f"Error in connParam {connParamLabel}: '{paramName}' has to be of the exact same length as 'connList'. Aborting.."
+            paramValList.extend(paramVal)
 
-    if connParam['synsPerConn'] == 1:
-        if isinstance(connParam.get('sec'), list):
-            connParam['secFromList'] = list(connParam['sec'])
-    else:
-        pass # TODO: needs consistent handling
+            # if len(paramVal) == numConns:
+            #     # check each value for correspondence to synsPerConn, or multiply per syn
+            #     for i, val in enumerate(paramVal):
+            #         if type(val) in (list, tuple):
+            #             assert len(val) == numSyns, \
+            #                 f"Error in connParam {connParamLabel}: '{paramName}' has to be of the exact same length as 'connList'. Aborting.."
+            #         # else:
+            #             # paramVal[i] = [val] * numSyns
+            #         paramValList.append(val)
 
-    # for pointer connections (e.g. gap junctions) only:
-    if isinstance(connParam.get('preLoc'), list):
-        connParam['preLocFromList'] = list(connParam['preLoc'])
-    if isinstance(connParam.get('preSec'), list):
-        connParam['preSecFromList'] = list(connParam['preSec'])
+            # elif len(paramVal) == numSyns:
+            #     paramValList.append(paramVal)
+            #     pass # multiply per conn
+            #     # smthFromList = [paramVal] * numConns
+            # else:
+            #     raise Exception(f"Error in connParam {connParamLabel}: '{paramName}' has to be of the exact same length as 'connList'. Aborting..")
+        else:
+            # paramVal = [paramVal] * numSyns
+            paramValList.append(paramVal)
+            # smthFromList = [paramVal] * numConns
 
-    for iconn, (relativePreId, relativePostId) in enumerate(connParam['connList']):  # for each postsyn cell
-        if sim.rank == 0 and not sim.cfg.verbose and sim.cfg.progressBar: pbar.update(1)
+    # # synMech is an exception - here having different values for each synapse (in case synMechsPerConn > 1) is not supported
+    # paramVal = connParam.get('synMech')
+    # if paramVal is not None:
+    #     if type(synMechs) in (list, tuple):
+    #         assert len(paramVal) == numConns
+    #         for sMech in paramVal:
+    #             assert isinstance(sMech, str)
+    #             synMechs.append(sMech)
+    #         synMechs = copy(paramVal)
+    #     else:
+    #         assert isinstance(paramVal, str)
+    #         synMechs = [paramVal]
+
+
+    # if 'weight' in connParam and isinstance(connParam['weight'], list):
+    #     connParam['weightFromList'] = list(connParam['weight'])  # if weight is a list, copy to weightFromList
+    # if 'delay' in connParam and isinstance(connParam['delay'], list):
+    #     connParam['delayFromList'] = list(connParam['delay'])
+    # if 'loc' in connParam and isinstance(connParam['loc'], list):
+    #     connParam['locFromList'] = list(connParam['loc'])
+    # if 'synMech' in connParam and isinstance(connParam['synMech'], list):
+    #     connParam['synMechFromList'] = list(connParam['synMech'])
+
+    # if connParam['synsPerConn'] == 1:
+    #     if isinstance(connParam.get('sec'), list):
+    #         connParam['secFromList'] = list(connParam['sec'])
+    # else:
+    #     pass # TODO: needs consistent handling
+
+    # # for pointer connections (e.g. gap junctions) only:
+    # if isinstance(connParam.get('preLoc'), list):
+    #     connParam['preLocFromList'] = list(connParam['preLoc'])
+    # if isinstance(connParam.get('preSec'), list):
+    #     connParam['preSecFromList'] = list(connParam['preSec'])
+
+    connList = connParam.pop('connList')
+
+    for iconn, (relativePreId, relativePostId) in enumerate(connList):  # for each postsyn cell
+        if sim.rank == 0 and not sim.cfg.verbose and sim.cfg.progressBar: pbar.update(1) # resolved merge conflict after stash-apply
+
+        assert relativePreId < len(orderedPreGids),\
+            f"Error in connParam {connParamLabel}: cell index in pre population in connection {iconn} is out of range. Aborting.."
+        assert relativePostId < len(orderedPostGids), \
+            f"Error in connParam {connParamLabel}: cell index in post population in connection {iconn} is out of range. Aborting.."
+
         preCellGid = orderedPreGids[relativePreId]
         postCellGid = orderedPostGids[relativePostId]
+
         if postCellGid in self.gid2lid:  # check if postsyn is in this node's list of gids
 
-            if 'weightFromList' in connParam:
-                connParam['weight'] = connParam['weightFromList'][iconn]
-            if 'delayFromList' in connParam:
-                connParam['delay'] = connParam['delayFromList'][iconn]
-            if 'locFromList' in connParam:
-                connParam['loc'] = connParam['locFromList'][iconn]
-            if 'secFromList' in connParam:
-                connParam['sec'] = connParam['secFromList'][iconn]
-            if 'preLocFromList' in connParam:
-                connParam['preLoc'] = connParam['preLocFromList'][iconn]
-            if 'preSecFromList' in connParam:
-                connParam['preSec'] = connParam['preSecFromList'][iconn]
+            def setConnValFromList(lst, iConn, connKey):
+                if not lst: return # this param not specified, skip it to use default value later
+                if len(lst) == 1: # this means the same value is used for all connections
+                    connParam[connKey] = lst[0]
+                else:
+                    connParam[connKey] = lst[iConn]
+            
+            setConnValFromList(weights, iconn, 'weight')
+            setConnValFromList(delays, iconn, 'delay')
+            setConnValFromList(locs, iconn, 'loc')
+            setConnValFromList(secs, iconn, 'sec')
+            setConnValFromList(preLocs, iconn, 'preLoc')
+            setConnValFromList(preSecs, iconn, 'preSec')
 
-            # TODO: consider cfg.allowSelfConns?
+            # TODO:  consider cfg.allowSelfConns?
             if preCellGid != postCellGid:  # if not self-connection
                 self._addCellConn(connParam, preCellGid, postCellGid, preCellsTags)  # add connection
     if sim.rank == 0 and not sim.cfg.verbose and sim.cfg.progressBar: pbar.close()
@@ -901,7 +976,7 @@ def _addCellConn(self, connParam, preCellGid, postCellGid, preCellsTags={}):
     from ..specs.netParams import SynMechParams
 
     # set final param values
-    paramStrFunc = self.connStringFuncParams
+    paramStrFunc = self.connStringFuncParams # [weight, delay, synsPerConn, loc]
     finalParam = {}
 
     # Set final parameter values; initialize randomizer for string-based funcs that use rand to ensue replicability
@@ -928,29 +1003,74 @@ def _addCellConn(self, connParam, preCellGid, postCellGid, preCellsTags={}):
     if not isinstance(connParam.get('synMech'), list):
         connParam['synMech'] = [connParam.get('synMech')]
 
-    # generate dict with final params for each synMech
-    paramPerSynMech = ['weight', 'delay', 'loc']
-    for i, synMech in enumerate(connParam.get('synMech')):
+    # if onlyOneSynPerSynMechAllowed: # this is the case for `fromListConn()`
+    #     # workaround: wrap it with another list, so that the for-loop below has only one iteration
+    #     synMechs = [connParam.get('synMech')] 
+    # else:
+    #     # otherwise, use original synMechs and generate dict with final params for each synMech
+    #     synMechs = connParam['synMech']
+    synMechs = connParam['synMech']
+    numSynMechs = len(synMechs)
+    
 
+
+    for i, synMech in enumerate(synMechs):
+
+        # if cloneConnPerSynMech:
+        paramPerSynMech = ['weight', 'delay', 'loc'] # BUT WHAT ABOUT SEC?
         for param in paramPerSynMech:
-            finalParam[param + 'SynMech'] = finalParam.get(param)
-            if len(connParam['synMech']) > 1:
+            if numSynMechs == 1:
+                finalParamVal = finalParam.get(param)
+            else:
                 if isinstance(finalParam.get(param), list):  # get weight from list for each synMech
-                    finalParam[param + 'SynMech'] = finalParam[param][i]
-                elif 'synMech' + param.title() + 'Factor' in connParam:  # adapt weight for each synMech
-                    finalParam[param + 'SynMech'] = (
-                        finalParam[param] * connParam['synMech' + param.title() + 'Factor'][i]
-                    )
+                    assert len(finalParam[param]) == numSynMechs
+                    finalParamVal = finalParam[param][i]
+                elif f'synMech{param}Factor' in connParam:  # adapt weight for each synMech
+                    factors = connParam[f'synMech{param}Factor']
+                    assert len(factors) == numSynMechs
+                    assert type(finalParam[param]) in int, float
+                    finalParamVal = finalParam[param] * factors[i]
+                else:
+                    finalParamVal = finalParam.get(param)
+
+            finalParam[param + 'SynMech'] = finalParamVal
+
+        # same for sec
+        if numSynMechs == 1:
+            sec = connParam.get('sec')
+        else:
+            if isinstance(connParam.get('sec'), list):  # get sec from list for each synMech
+                assert len(connParam['sec']) == numSynMechs
+                sec = connParam['sec'][i]
+            else:
+                sec = connParam.get('sec')
+        # check that sec is either string or list of strings
+        secValid = (sec is None) or isinstance(sec, str)
+        if not secValid and isinstance(sec, list):
+            secValid = all([isinstance(s, str) for s in sec])
+        assert secValid, f"`sec` needs to be either string or list of strings"
+
 
         params = {
             'preGid': preCellGid,
-            'sec': connParam.get('sec'),
-            'loc': finalParam['locSynMech'],
+            'sec': sec,
+            'loc': finalParam['locSynMech'], # if cloneConnPerSynMech else connParam['loc'],
             'synMech': synMech,
-            'weight': finalParam['weightSynMech'],
-            'delay': finalParam['delaySynMech'],
-            'synsPerConn': finalParam['synsPerConn'],
+            'weight': finalParam['weightSynMech'], # if cloneConnPerSynMech else connParam['weight'],
+            'delay': finalParam['delaySynMech'], # if cloneConnPerSynMech else connParam['delay'],
+            'synsPerConn': finalParam['synsPerConn'], # if cloneConnPerSynMech else 1,
         }
+
+        # if onlyOneSynPerSynMechAllowed and len(): # i.e.
+        #     params['synsPerConn'] = 1
+        #     if type(params['sec']) in [list, tuple]:
+        #         params['sec'] = params['sec'][i]
+
+        # if len(synMechs) == params['synsPerConn']: # TODO BETTER check value before in fromListConn() and PASS as AN ARGUMENT
+
+
+        #     if cloneConnPerSynMech is False: # i.e.
+        #         params['synsPerConn'] = 1
 
         # if 'threshold' in connParam: params['threshold'] = connParam.get('threshold')  # deprecated, use threshold in preSyn cell sec
         if 'shape' in connParam:
@@ -965,23 +1085,23 @@ def _addCellConn(self, connParam, preCellGid, postCellGid, preCellsTags={}):
         if 'connRandomSecFromList' in connParam:
             params['connRandomSecFromList'] = connParam['connRandomSecFromList']
 
-        isGapJunction = 'gapJunction' in connParam  # deprecated way of defining gap junction
-        if self.params.synMechParams.isPointerConn(params['synMech']) or isGapJunction:
-            params['preLoc'] = connParam.get('preLoc')
-            params['preSec'] = connParam.get('preSec', 'soma')
-            if isGapJunction:
-                params['gapJunction'] = connParam['gapJunction']
-        # TODO: synMech can be None here (meaning 'use default'). Then need to use default label while checking below
-        elif SynMechParams.stringFuncsReferPreLoc(synMech):
-            # save synapse pre-cell location to be used in stringFunc for synMech.
-            # for optimization purpose, do it only if preLoc is referenced for a given synMech
-            cellType = preCellsTags[preCellGid].get('cellType')
-            if cellType:
-                from ..cell import CompartCell
+        # isGapJunction = 'gapJunction' in connParam  # deprecated way of defining gap junction
+        # if self.params.synMechParams.isPointerConn(params['synMech']) or isGapJunction:
+        #     params['preLoc'] = connParam.get('preLoc')
+        #     params['preSec'] = connParam.get('preSec', 'soma')
+        #     if isGapJunction:
+        #         params['gapJunction'] = connParam['gapJunction']
+        # # TODO: synMech can be None here (meaning 'use default'). Then need to use default label while checking below
+        # elif SynMechParams.stringFuncsReferPreLoc(synMech):
+        #     # save synapse pre-cell location to be used in stringFunc for synMech.
+        #     # for optimization purpose, do it only if preLoc is referenced for a given synMech
+        #     cellType = preCellsTags[preCellGid].get('cellType')
+        #     if cellType:
+        #         from ..cell import CompartCell
 
-                secs = self.params.cellParams[cellType].secs
-                loc, _ = CompartCell.spikeGenLocAndSec(secs)
-                params['preLoc'] = loc
+        #         secs = self.params.cellParams[cellType].secs
+        #         loc, _ = CompartCell.spikeGenLocAndSec(secs)
+        #         params['preLoc'] = loc
 
         if sim.cfg.includeParamsLabel:
             params['label'] = connParam.get('label')

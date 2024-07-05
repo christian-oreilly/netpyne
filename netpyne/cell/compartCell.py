@@ -852,8 +852,9 @@ If this cell is expected to be a point cell instead, make sure the correspondent
             params['delay'] = sim.net.params.defaultDelay  # if no delay, set default
         if params.get('preLoc') is None:
             params['preLoc'] = 0.5  # if no preLoc, set default
-        if params.get('loc') is None:
-            params['loc'] = 0.5  # if no loc, set default
+        # remove because we want to differ default case from explicitly stating 0.5 by user
+        # if params.get('loc') is None:
+        #     params['loc'] = 0.5  # if no loc, set default
         if params.get('synsPerConn') is None:
             params['synsPerConn'] = 1  # if no synsPerConn, set default
 
@@ -918,6 +919,7 @@ If this cell is expected to be a point cell instead, make sure the correspondent
             if pointerParams:
                 if isPreToPostPointerConn:
                     # generate new ids
+                    # TODO: will it even works with synsPerConn > 1? (in particular, loc in params now can be None)
                     preToPostPointerId, postToPrePointerId = self.__generatePointerIds(pointerParams, params)
                 else:
                     # use pre-generated
@@ -1462,16 +1464,16 @@ If this cell is expected to be a point cell instead, make sure the correspondent
 
     def _setConnSynMechs(self, params, secLabels):
         from .. import sim
+        connLabel = params.get('label')
 
-        distributeSynsUniformly = params.get('distributeSynsUniformly', sim.cfg.distributeSynsUniformly)
         connRandomSecFromList = params.get('connRandomSecFromList', sim.cfg.connRandomSecFromList)
+        distributeSynsUniformly = params.get('distributeSynsUniformly', sim.cfg.distributeSynsUniformly)
 
         synsPerConn = params['synsPerConn']
         if not params.get('synMech'):
             if sim.net.params.synMechParams:  # if no synMech specified, but some synMech params defined
-                synLabel = list(sim.net.params.synMechParams.keys())[
-                    0
-                ]  # select first synMech from net params and add syn
+                # select first synMech from net params and add syn:
+                synLabel = list(sim.net.params.synMechParams.keys())[0] 
                 params['synMech'] = synLabel
                 if sim.cfg.verbose:
                     print(
@@ -1479,67 +1481,74 @@ If this cell is expected to be a point cell instead, make sure the correspondent
                         % (self.gid, synLabel)
                     )
             else:  # if no synaptic mechanism specified and no synMech params available
-                if sim.cfg.verbose:
-                    print('  Error: no synaptic mechanisms available to add conn on cell gid=%d ' % (self.gid))
-                return -1  # if no Synapse available print error and exit
+                raise Exception(f"  Error in connParams['{connLabel}']: no synaptic mechanisms available to add conn on cell gid={self.gid}")
 
         # if desired synaptic mechanism specified in conn params
         if synsPerConn > 1:  # if more than 1 synapse
             if len(secLabels) == 1:  # if single section, create all syns there
                 synMechSecs = [secLabels[0]] * synsPerConn  # same section for all
                 if isinstance(params['loc'], list):
-                    if len(params['loc']) == synsPerConn:
-                        synMechLocs = params['loc']
+                    assert len(params['loc']) == synsPerConn, \
+                        f"Error: The length of the list of locations does not match synsPerConn"
+                    synMechLocs = params['loc']
+                else: # single value or no value
+                    if distributeSynsUniformly:
+                        if params['loc'] is None:
+                            synMechLocs = [i * (1.0 / synsPerConn) + 1.0 / synsPerConn / 2 for i in range(synsPerConn)]
+                        else:
+                            raise Exception(f"Error in {''}: specifiyng the `loc` explicitly is ambiguous when `distributeSynsUniformly` is True. Consider removing `loc` for this connection, or setting `distributeSynsUniformly` to False.")
                     else:
-                        if sim.cfg.verbose:
-                            print(
-                                "Error: The length of the list of locations does not match synsPerConn (distributing uniformly)"
-                            )
-                        synMechSecs, synMechLocs = self._distributeSynsUniformly(
-                            secList=secLabels, numSyns=synsPerConn
-                        )
-                else:
-                    synMechLocs = [i * (1.0 / synsPerConn) + 1.0 / synsPerConn / 2 for i in range(synsPerConn)]
+                        synMechLocs = [params['loc']] * synsPerConn
             else:
+
+                # numLocs = len(params['loc']) if isinstance(params['loc'], list) else 1
+                # if numLocs > 1 and numLocs == synsPerConn:
+                #     distributeSynsUniformly = False
+                # else:
+                #     distributeSynsUniformly = params.get('distributeSynsUniformly', sim.cfg.distributeSynsUniformly)
+
                 # if multiple sections, distribute syns uniformly
                 if distributeSynsUniformly:
+                    # Check if loc is specified. If so, ERROR: conflicting.. Please either remove loc or turn distribSynsUnif to False
                     synMechSecs, synMechLocs = self._distributeSynsUniformly(secList=secLabels, numSyns=synsPerConn)
                 else:
                     # have list of secs that matches num syns
-                    if not connRandomSecFromList and synsPerConn == len(secLabels):
+                    if connRandomSecFromList == False:
+                        assert synsPerConn == len(secLabels), \
+                            f"With connRandomSecFromList = False, the length of the list of sections should match synsPerConn"
+
                         synMechSecs = secLabels
+
                         if isinstance(params['loc'], list):
-                            if len(params['loc']) == synsPerConn:  # list of locs matches num syns
-                                synMechLocs = params['loc']
-                            else:  # list of locs does not match num syns
-                                print("Error: The length of the list of locations does not match synsPerConn (with distributeSynsUniformly = False)")
-                                return
-                        else:  # single loc
+                            assert synsPerConn == len(params['loc']), \
+                                f"Error: The length of the list of locations does not match synsPerConn (with distributeSynsUniformly = False, connRandomSecFromList = False)"
+                            synMechLocs = params['loc']
+                        else:  # if single loc, clone this value to match number of syns
                             synMechLocs = [params['loc']] * synsPerConn
                     else:
-                        synMechSecs = secLabels
-                        synMechLocs = params['loc'] if isinstance(params['loc'], list) else [params['loc']]
+                        rand = h.Random()
+                        preGid = params['preGid'] if isinstance(params['preGid'], int) else 0
+                        rand.Random123(sim.hashStr('connSynMechsSecs'), self.gid, preGid)  # initialize randomizer
 
-                        # randomize the section to connect to and move it to beginning of list
-                        if connRandomSecFromList and len(synMechSecs) >= synsPerConn:
-                            if len(synMechLocs) == 1:
-                                synMechLocs = [params['loc']] * synsPerConn
-                            rand = h.Random()
-                            preGid = params['preGid'] if isinstance(params['preGid'], int) else 0
-                            rand.Random123(sim.hashStr('connSynMechsSecs'), self.gid, preGid)  # initialize randomizer
+                        from ..network.conn import randInt
+                        maxval = len(secLabels) - 1
+                        isUnique = synsPerConn <= maxval + 1
+                        randSecPos = randInt(rand, N=synsPerConn, vmin=0, vmax=maxval, unique=isUnique)
+                        synMechSecs = [secLabels[i] for i in randSecPos]
 
-                            randSecPos = sim.net.randUniqueInt(rand, synsPerConn, 0, len(synMechSecs) - 1)
-                            synMechSecs = [synMechSecs[i] for i in randSecPos]
-
-                            if isinstance(params['loc'], list):
-                                randLocPos = sim.net.randUniqueInt(rand, synsPerConn, 0, len(synMechLocs) - 1)
-                                synMechLocs = [synMechLocs[i] for i in randLocPos]
-                            else:
-                                rand.uniform(0, 1)
-                                synMechLocs = [rand.repick() for i in range(synsPerConn)]
+                        if isinstance(params['loc'], list):
+                            maxval = len(params['loc']) - 1
+                            isUnique = synsPerConn <= maxval + 1
+                            randLocPos = randInt(rand, N=synsPerConn, vmin=0, vmax=maxval, unique=isUnique)
+                            synMechLocs = [params['loc'][i] for i in randLocPos]
                         else:
-                            print("\nError: The length of the list of sections needs to be greater or equal to the synsPerConn (with connRandomSecFromList = True)")
-                            return
+                            if params['loc'] is not None:
+                                raise Exception('Loc ignored')
+                                # TODO: would be good to do this way instead:
+                                # synMechLocs = [params['loc']] * synsPerConn # while the code below goes to 'else'
+                            rand.uniform(0, 1)
+                            synMechLocs = h.Vector(synsPerConn).setrand(rand).to_python()
+
 
         else:  # if 1 synapse
             # by default place on 1st section of list and location available
@@ -1557,12 +1566,12 @@ If this cell is expected to be a point cell instead, make sure the correspondent
                     synMechLocs[pos], synMechLocs[0] = synMechLocs[0], synMechLocs[pos]
 
         # add synaptic mechanism to section based on synMechSecs and synMechLocs (if already exists won't be added unless nonLinear set to True)
-        synMechs = [
-            self.addSynMech(
-                synLabel=params['synMech'], secLabel=synMechSecs[i], loc=synMechLocs[i], preLoc=params['preLoc']
-            )
-            for i in range(synsPerConn)
-        ]
+        synMechs = []
+        for i in range(synsPerConn):
+            if synMechLocs[i] is None:
+                synMechLocs[i] = 0.5
+            synMech = self.addSynMech(synLabel=params['synMech'], secLabel=synMechSecs[i], loc=synMechLocs[i], preLoc=params['preLoc'])
+            synMechs.append(synMech)
         return synMechs, synMechSecs, synMechLocs
 
     def _distributeSynsUniformly(self, secList, numSyns):
